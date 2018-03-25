@@ -3,6 +3,7 @@ import * as analytics from './analytics';
 import * as breakpoints from './breakpoints';
 import * as contentLoader from './content-loader';
 import * as drawer from './drawer';
+import {onNewSwActive, messageSw} from './sw-utils.js';
 
 /**
  * The main script entry point for the site. Initalizes all the sub modules
@@ -14,12 +15,28 @@ const main = async () => {
   contentLoader.init();
   drawer.init();
 
-  analytics.init();
+  // analytics.init();
+
   if ('serviceWorker' in navigator) {
+    const updatesChannel = new BroadcastChannel('api-updates');
+    updatesChannel.addEventListener('message', async (event) => {
+      console.log('BroadcastChannel message', event.data);
+    });
+
     try {
-      await navigator.serviceWorker.register('/sw.js');
+      const registration = await navigator.serviceWorker.register('/sw.js');
+
+      onNewSwActive(registration, (sw) => {
+        const urls = [
+          location.href,
+          ...performance.getEntriesByType('resource').map(({name}) => name),
+        ];
+
+        messageSw(sw, {cmd: 'CACHE_LOADED_RESOURCES', urls});
+      });
     } catch (err) {
-      analytics.trackError(err);
+      console.error(err);
+      // analytics.trackError(err);
     }
   }
 };

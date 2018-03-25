@@ -3,11 +3,17 @@
 const gulp = require('gulp');
 const md5 = require('md5');
 const path = require('path');
-const TerserPlugin = require('terser-webpack-plugin');
+const {rollup} = require('rollup');
+const babel = require('rollup-plugin-babel');
+const replace = require('rollup-plugin-replace');
+const resolve = require('rollup-plugin-node-resolve');
+const terserRollupPlugin = require('rollup-plugin-terser').terser;
+const TerserWebpackPlugin = require('terser-webpack-plugin');
 const webpack = require('webpack');
 const ManifestPlugin = require('webpack-manifest-plugin');
 const {addAsset, getManifest, getRevisionedAssetUrl} =
     require('./utils/assets');
+const {checkModuleDuplicates} = require('./utils/check-module-duplicates.js');
 const config = require('../config.json');
 
 
@@ -112,7 +118,7 @@ const getMainConfig = () => Object.assign(baseConfig(), {
         },
       },
     },
-    minimizer: [new TerserPlugin({
+    minimizer: [new TerserWebpackPlugin({
       test: /\.m?js$/,
       sourceMap: true,
       terserOptions: {
@@ -142,7 +148,7 @@ const getLegacyConfig = () => Object.assign(baseConfig(), {
     ],
   },
   optimization: {
-    minimizer: [new TerserPlugin({
+    minimizer: [new TerserWebpackPlugin({
       test: /\.m?js$/,
       sourceMap: true,
       terserOptions: {
@@ -150,62 +156,6 @@ const getLegacyConfig = () => Object.assign(baseConfig(), {
         // because it breaks polyfills.
         mangle: true,
         safari10: true,
-      },
-    })],
-  },
-});
-
-const getSwConfig = () => ({
-  mode: process.env.NODE_ENV || 'development',
-  entry: {
-    'sw': './assets/sw.js',
-  },
-  output: {
-    path: path.resolve(__dirname, '..', config.publicDir),
-    filename: '[name].js',
-  },
-  cache: buildCache,
-  devtool: '#source-map',
-  plugins: [
-    new webpack.DefinePlugin({
-      MAIN_CSS_URL: JSON.stringify(getRevisionedAssetUrl('main.css')),
-      MAIN_JS_URL: JSON.stringify(getRevisionedAssetUrl('main.mjs')),
-      MAIN_RUNTIME_URL: JSON.stringify(getRevisionedAssetUrl('runtime.mjs')),
-
-      // Hard code here until switching to workbox.
-      VENDOR_AUTOTRACK_URL: JSON.stringify(
-          getRevisionedAssetUrl('vendor.autotrack.mjs')),
-      VENDOR_IDLIZE_URL: JSON.stringify(
-          getRevisionedAssetUrl('vendor.idlize.mjs')),
-      VENDOR_DOM_UTILS_URL: JSON.stringify(
-          getRevisionedAssetUrl('vendor.dom-utils.mjs')),
-    }),
-  ],
-  module: {
-    rules: [
-      generateBabelEnvLoader({
-        browsers: [
-          // Browsers that support service worker.
-          'last 2 Chrome versions', 'not Chrome < 45',
-          'last 2 Firefox versions', 'not Firefox < 44',
-          'last 2 Edge versions', 'not Edge < 17',
-          'last 2 Safari versions', 'not Safari < 11.1',
-        ],
-      }),
-    ],
-  },
-  optimization: {
-    minimizer: [new TerserPlugin({
-      sourceMap: true,
-      terserOptions: {
-        // TODO(philipwalton): mangling properties in the service worker
-        // breaks dependencies for some reason.
-        // mangle: {
-        //   properties: {
-        //     regex: /(^_|_$)/,
-        //   }
-        // },
-        mangle: true,
       },
     })],
   },
@@ -228,13 +178,10 @@ const createCompiler = (config) => {
   };
 };
 
-gulp.task('javascript', async () => {
+gulp.task('javascript:main', async () => {
   try {
     const compileMainBundle = createCompiler(getMainConfig());
     await compileMainBundle();
-
-    const compileSwBundle = createCompiler(getSwConfig());
-    await compileSwBundle();
 
     if (['debug', 'production'].includes(process.env.NODE_ENV)) {
       // Generate the main-legacy bundle.
@@ -245,3 +192,56 @@ gulp.task('javascript', async () => {
     console.error(err);
   }
 });
+
+gulp.task('javascript:sw', async () => {
+  try {
+    const plugins = [
+      resolve(),
+      replace({
+        'process.env.NODE_ENV':
+            JSON.stringify(process.env.NODE_ENV || 'development'),
+      }),
+      babel({
+        presets: [['@babel/env', {
+          // debug: true,
+          modules: false,
+          // useBuiltIns: true,
+          targets: {
+            browsers: [
+              'last 2 Chrome versions', 'not Chrome < 45',
+              'last 2 Firefox versions', 'not Firefox < 44',
+              'last 2 Edge versions', 'not Edge < 17',
+              'last 2 Safari versions', 'not Safari < 11.1',
+            ],
+          },
+        }]],
+      }),
+    ];
+    if (process.env.NODE_ENV) {
+      plugins.push(terserRollupPlugin({
+        mangle: {
+          properties: {
+            regex: /(^_|_$)/,
+          }
+        },
+      }));
+    }
+
+    const bundle = await rollup({
+      input: 'assets/sw/sw.js',
+      plugins,
+    });
+
+    checkModuleDuplicates(bundle.modules.map((m) => m.id));
+
+    await bundle.write({
+      file: 'build/sw.js',
+      // sourcemap: true,
+      format: 'es',
+    });
+  } catch (err) {
+    console.error(err);
+  }
+});
+
+gulp.task('javascript', gulp.series('javascript:main', 'javascript:sw'));
